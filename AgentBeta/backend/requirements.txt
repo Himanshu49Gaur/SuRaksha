@@ -6,3 +6,12 @@ transformers
 safetensors
 requests
 python-dotenv
+celery
+redis
+langgraph
+langchain-core
+langchain-google-genai
+pinecone-client
+langchain-pinecone
+beautifulsoup4
+lxml

@@ -56,6 +56,8 @@ def init_db():
     # Insert default settings if not exists
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('threshold', '0.50')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('gemini_api_key', '')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pinecone_api_key', '')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('slack_webhook_url', '')")
 
     # Insert default department skill profiles
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('skills_IT', 'cybersecurity data encryption AES-256 cloud systems firewall access control authentication API security network vulnerability patch management protocol HTTPS SSL TLS')")
