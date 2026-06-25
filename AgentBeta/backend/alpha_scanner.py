@@ -4,8 +4,8 @@ import torch
 from transformers import BertForSequenceClassification, AutoTokenizer
 
 DEFAULT_MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-    "agent_alpha_gold_master (1)"
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
+    "AgentAlphaGoldMaster"
 )
 
 class AlphaScanner:
@@ -108,7 +108,7 @@ class AlphaScanner:
 if __name__ == "__main__":
     # Test scanner on BankSavers.pdf
     pdf_file = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
         "BankSavers.pdf"
     )
     scanner = AlphaScanner()

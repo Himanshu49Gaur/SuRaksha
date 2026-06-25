@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-const API_BASE = "http://127.0.0.1:8000/api";
+const API_BASE = "/api";
 
 export default function App() {
   // Navigation State
@@ -116,13 +116,50 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json();
-        setUploadStatus({
-          success: true,
-          message: `Successfully processed ${file.name}. Scanned ${data.total_segments} pages, escalated ${data.escalated_count} anomalies.`
-        });
-        fetchStats();
-        fetchAlerts();
-        fetchTickets();
+        
+        if (data.status === "completed") {
+          // Sync result (task_always_eager=True on localhost)
+          setUploadStatus({
+            success: true,
+            message: `Successfully processed ${file.name}. Scanned ${data.total_segments} pages, escalated ${data.escalated_count} anomalies.`
+          });
+          fetchStats();
+          fetchAlerts();
+          fetchTickets();
+        } else if (data.status === "processing" && data.task_id) {
+          // Async result - poll for task completion
+          setUploadStatus({
+            success: true,
+            message: `Document ${file.name} is being processed in the background. Refresh in a moment...`
+          });
+          // Poll every 3s up to 60s
+          let attempts = 0;
+          const poll = setInterval(async () => {
+            attempts++;
+            try {
+              const statusRes = await fetch(`${API_BASE}/task-status/${data.task_id}`);
+              if (statusRes.ok) {
+                const statusData = await statusRes.json();
+                if (statusData.status === "completed") {
+                  clearInterval(poll);
+                  setUploadStatus({
+                    success: true,
+                    message: `Successfully processed ${file.name}. Scanned ${statusData.total_segments} pages, escalated ${statusData.escalated_count} anomalies.`
+                  });
+                  fetchStats();
+                  fetchAlerts();
+                  fetchTickets();
+                } else if (statusData.status === "failed") {
+                  clearInterval(poll);
+                  setUploadStatus({ success: false, message: `Processing failed: ${statusData.error}` });
+                }
+              }
+            } catch (_) {}
+            if (attempts >= 20) {
+              clearInterval(poll);
+            }
+          }, 3000);
+        }
       } else {
         const data = await res.json();
         setUploadStatus({
@@ -131,7 +168,7 @@ export default function App() {
         });
       }
     } catch (err) {
-      setUploadStatus({ success: false, message: "Network error during upload." });
+      setUploadStatus({ success: false, message: "Network error during upload. Is the backend running?" });
     } finally {
       setLoading(false);
       setIsScanning(false);
@@ -236,12 +273,16 @@ export default function App() {
       const res = await fetch(`${API_BASE}/audit-loop`, { method: "POST" });
       if (res.ok) {
         const data = await res.json();
-        alert(`Audit loop completed. Re-audited ${data.audited_tickets_count} tickets.`);
+        const count = data.audited_tickets_count ?? 0;
+        alert(`Audit loop completed. Re-audited ${count} tickets.`);
         fetchStats();
         fetchTickets();
+      } else {
+        alert("Audit loop failed. Is the backend running?");
       }
     } catch (err) {
       console.error(err);
+      alert("Network error. Is the backend running at http://127.0.0.1:8000?");
     } finally {
       setLoading(false);
     }

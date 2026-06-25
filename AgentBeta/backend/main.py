@@ -202,14 +202,41 @@ async def upload_document(file: UploadFile = File(...), threshold: float = Form(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        # Dispatch to Celery background task
-        task = process_document_task.delay(file_path, file.filename, threshold)
-        
-        return {
-            "status": "processing",
-            "document_name": file.filename,
-            "task_id": task.id
-        }
+        # Process document directly to avoid Celery/Redis dependency and proxy timeouts
+        try:
+            # Run scanning pipeline directly
+            scanned_results = scanner.scan_document(file_path, threshold)
+            
+            # Structure segments for database storage
+            segments = [{
+                "content": seg["content"],
+                "rscore": seg["rscore"]
+            } for seg in scanned_results]
+            
+            escalated_count = process_scanned_segments(file.filename, segments, threshold)
+            
+            return {
+                "status": "completed",
+                "document_name": file.filename,
+                "task_id": "direct",
+                "total_segments": len(scanned_results),
+                "escalated_count": escalated_count
+            }
+        except Exception as direct_err:
+            # Fallback: try Celery task if direct processing fails
+            try:
+                task = process_document_task.delay(file_path, file.filename, threshold)
+                return {
+                    "status": "processing",
+                    "document_name": file.filename,
+                    "task_id": task.id,
+                    "total_segments": 0,
+                    "escalated_count": 0
+                }
+            except Exception:
+                raise HTTPException(status_code=500, detail=str(direct_err))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -317,7 +344,46 @@ def run_continuous_audit_loop():
     """Triggers an audit recheck task manually via Celery."""
     try:
         task = run_audit_loop.delay()
-        return {"status": "processing", "task_id": task.id, "message": "Audit loop scheduled."}
+        # When task_always_eager=True (local dev), result is immediately available
+        try:
+            result = task.get(timeout=120)
+            return {
+                "status": "completed",
+                "task_id": task.id,
+                "message": "Audit loop completed.",
+                "audited_tickets_count": result.get("audited_count", 0)
+            }
+        except Exception:
+            return {
+                "status": "processing",
+                "task_id": task.id,
+                "message": "Audit loop scheduled.",
+                "audited_tickets_count": 0
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/task-status/{task_id}")
+def get_task_status(task_id: str):
+    """Polls for the result of an async Celery task by task_id."""
+    try:
+        from celery_app import celery
+        task_result = celery.AsyncResult(task_id)
+        if task_result.state == 'PENDING':
+            return {"status": "processing", "task_id": task_id}
+        elif task_result.state == 'SUCCESS':
+            result = task_result.result
+            return {
+                "status": "completed",
+                "task_id": task_id,
+                "total_segments": result.get("total_segments", 0),
+                "escalated_count": result.get("escalated_count", 0),
+                "audited_count": result.get("audited_count", 0)
+            }
+        elif task_result.state == 'FAILURE':
+            return {"status": "failed", "task_id": task_id, "error": str(task_result.result)}
+        else:
+            return {"status": task_result.state.lower(), "task_id": task_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
