@@ -8,6 +8,7 @@ import sqlite3
 from alpha_scanner import AlphaScanner
 from beta_orchestrator import BetaOrchestrator
 from database import get_db_connection, init_db
+from tasks import process_document_task, run_audit_loop, process_scanned_segments
 
 # Initialize FastAPI App
 app = FastAPI(title="Sentinel-RegAI Compliance Backend", version="1.0.0")
@@ -44,6 +45,25 @@ class SettingsUpdate(BaseModel):
 class ManualTextIngest(BaseModel):
     document_name: str
     text_content: str
+
+class SourceIngestRequest(BaseModel):
+    source_type: str # 'RBI', 'SEC', 'WEB'
+    url: str = None
+    threshold: float = 0.50
+
+@app.post("/api/ingest-source")
+def trigger_source_ingestion(data: SourceIngestRequest):
+    """Triggers autonomous ingestion from external APIs or Web scrapers."""
+    try:
+        from tasks import ingest_source_task
+        task = ingest_source_task.delay(data.source_type, data.url, data.threshold)
+        return {
+            "status": "processing",
+            "source_type": data.source_type,
+            "task_id": task.id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/dashboard")
 def get_dashboard_stats():
@@ -169,41 +189,7 @@ def update_settings(data: SettingsUpdate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def process_scanned_segments(document_name, segments, threshold):
-    """Saves segments, runs Agent Beta to generate MAPs, routes tasks, and creates tickets."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    escalated_count = 0
-    for seg in segments:
-        content = seg["content"]
-        rscore = seg["rscore"]
-        is_escalated = 1 if rscore >= threshold else 0
-        
-        # Insert alert
-        cursor.execute("""
-        INSERT INTO alerts (document_name, content, rscore, is_escalated, status)
-        VALUES (?, ?, ?, ?, ?)
-        """, (document_name, content, rscore, is_escalated, "escalated" if is_escalated else "dismissed"))
-        alert_id = cursor.lastrowid
-        
-        if is_escalated:
-            escalated_count += 1
-            # Run Agent Beta MAP generation
-            title, map_desc = orchestrator.generate_map(content)
-            
-            # Route to department
-            dept, similarity = orchestrator.route_task(map_desc)
-            
-            # Create Ticket
-            cursor.execute("""
-            INSERT INTO tickets (alert_id, title, description, department, similarity_score, status)
-            VALUES (?, ?, ?, ?, ?, 'Open')
-            """, (alert_id, title, map_desc, dept, similarity))
-            
-    conn.commit()
-    conn.close()
-    return escalated_count
+
 
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...), threshold: float = Form(0.50)):
@@ -216,17 +202,13 @@ async def upload_document(file: UploadFile = File(...), threshold: float = Form(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        # Run Scanning Pipeline
-        results = scanner.scan_document(file_path, threshold=threshold)
-        
-        # Save and Generate Tickets
-        escalated_count = process_scanned_segments(file.filename, results, threshold)
+        # Dispatch to Celery background task
+        task = process_document_task.delay(file_path, file.filename, threshold)
         
         return {
-            "status": "success",
+            "status": "processing",
             "document_name": file.filename,
-            "total_segments": len(results),
-            "escalated_count": escalated_count
+            "task_id": task.id
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -303,7 +285,10 @@ async def submit_evidence(
             raise HTTPException(status_code=400, detail="Either evidence_text or file must be provided")
             
         # Run Auditing Engine
-        passed, score, feedback = orchestrator.audit_evidence(map_description, extracted_text)
+        state = orchestrator.run_audit_pipeline(map_description, extracted_text)
+        passed = state['audit_passed']
+        score = state['audit_score']
+        feedback = state['audit_feedback']
         
         status = "Approved" if passed else "Rejected"
         
@@ -329,36 +314,10 @@ async def submit_evidence(
 
 @app.post("/api/audit-loop")
 def run_continuous_audit_loop():
-    """Triggers an audit recheck on all tickets currently in 'Submitted' or 'Rejected' state.
-    Simulates a background cron task auditing evidence.
-    """
+    """Triggers an audit recheck task manually via Celery."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, description, evidence_text, evidence_file FROM tickets WHERE evidence_text IS NOT NULL AND status IN ('Submitted', 'Rejected', 'Open')")
-        rows = cursor.fetchall()
-        
-        audited_count = 0
-        for row in rows:
-            ticket_id = row['id']
-            map_desc = row['description']
-            evidence_text = row['evidence_text']
-            evidence_file = row['evidence_file']
-            
-            # Recheck evidence
-            passed, score, feedback = orchestrator.audit_evidence(map_desc, evidence_text)
-            status = "Approved" if passed else "Rejected"
-            
-            cursor.execute("""
-            UPDATE tickets
-            SET status = ?, audit_score = ?, audit_feedback = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """, (status, score, feedback, ticket_id))
-            audited_count += 1
-            
-        conn.commit()
-        conn.close()
-        return {"status": "success", "audited_tickets_count": audited_count}
+        task = run_audit_loop.delay()
+        return {"status": "processing", "task_id": task.id, "message": "Audit loop scheduled."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
